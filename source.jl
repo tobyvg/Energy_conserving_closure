@@ -22,6 +22,7 @@ struct mesh_struct
     dims # 1D/2D
     N # grid resoluiont
     x # coordinates
+    dx #dx in each dimension
     x_edges # edges
     omega # mass matrix
     eval_function # evaluate function on the grid
@@ -76,9 +77,12 @@ function generate_random_field(N,max_k;norm = 1,samples = (1,1))
     coefs = (rand(Uniform(-1,1),(N...,samples...)) + rand(Uniform(-1,1),(N...,samples...)) * (0+1im))
 
     result = real.(ifft(filter .* coefs,collect(1:dims)))
+    result .-= mean(result,dims = collect(1:dims))
     sqrt_energies = sqrt.(1/prod(N) .* sum(result.^2,dims = collect(1:dims)))
     result ./= sqrt_energies
     result .*= norm
+
+
     return result
 end
 
@@ -89,9 +93,9 @@ end
 function gen_mesh(x,y = nothing, z = nothing;UPC=1)
     if y != nothing
         if z != nothing
-            x = [z,y,x]
+            x = [x,y,z]
         else
-            x = [y,x]
+            x = [x,y]
         end
     else
         if length(size(x[1])) <= 0
@@ -106,10 +110,13 @@ function gen_mesh(x,y = nothing, z = nothing;UPC=1)
 
 
     sub_grid = ones([size(i)[1] for i in mid_x]...)
+    sub_dx = ones([size(i)[1] for i in mid_x]...)
     omega = ones([size(i)[1] for i in mid_x]...)
 
 
     sub_grids = []
+    sub_dxs = []
+
 
     dims = size(x)[1]
 
@@ -124,22 +131,28 @@ function gen_mesh(x,y = nothing, z = nothing;UPC=1)
         omega = permutedims(dx[i] .*  permutedims(omega,permuted_dims),permuted_dims)
 
         push!(sub_grids,permutedims(mid_x[i] .*  permutedims(sub_grid,permuted_dims),permuted_dims))
-
+        push!(sub_dxs,permutedims(dx[i] .*  permutedims(sub_dx,permuted_dims),permuted_dims))
     end
+
+
     x_edges = x
     x = cat(sub_grids...,dims = dims + 1)
+    dx = cat(sub_dxs...,dims = dims + 1)
+    omega = cat([omega for i in 1:UPC]...,dims = dims+1)
 
-
+    x = reshape(x,(size(x)...,1))
+    dx = reshape(dx,(size(dx)...,1))
+    omega = reshape(omega,(size(omega)...,1))
 
     function eval_function(F,x = x,dims = dims)
 
-        return F([x[[(:) for j in 1:dims]...,i] for i in 1:dims])
+        return F([x[[(:) for j in 1:dims]...,i:i,:] for i in 1:dims])
 
     end
 
     function ip(a,b;weighted = true,omega = omega,dims = dims,combine_channels = true)
         if weighted
-            IP = a .* omega .* b
+            IP = a .* omega[[(:) for i in 1:dims]...,1,1] .* b
         else
             IP = a .* b
         end
@@ -159,7 +172,7 @@ function gen_mesh(x,y = nothing, z = nothing;UPC=1)
 
 
 
-    return mesh_struct(dims,size(omega),x,x_edges,omega,eval_function,ip,integ,UPC)
+    return mesh_struct(dims,size(omega)[1:dims],x,dx,x_edges,omega,eval_function,ip,integ,UPC)
 end
 
 
@@ -284,11 +297,10 @@ function add_filter_to_modes(POD_modes,MP;orthogonalize = false)
 
     dims = MP.fine_mesh.dims
     UPC = MP.fine_mesh.UPC
-    sqrt_omega_tilde = sqrt.(MP.omega_tilde)
-    some_zeros = zeros(size(MP.omega_tilde))
+    sqrt_omega_tilde = sqrt.(MP.omega_tilde)[[(:) for i in 1:dims]...,1:1,1:1]
+    some_zeros = zeros(size(sqrt_omega_tilde))
 
-    modes = cat([sqrt_omega_tilde,(some_zeros for i in 1:UPC-1)...]...,dims = dims + 1)
-
+    modes = cat(sqrt_omega_tilde,[some_zeros for i in 1:UPC-1]...,dims = dims+1)
     modes = cat([circshift(modes,([0 for i in 1:dims]...,j)) for j in 0:(UPC-1)]...,dims = dims + 2)
     if POD_modes != 0
 
@@ -375,7 +387,7 @@ function gen_projection_operators(POD_modes,MP;uniform = false)
     else
         weights = POD_modes[[(1:J[i]) for i in 1:dims]...,:,:]
 
-        @assert dims <= 1 "Uniform Phi is not supported for dims > 1 at this time, set uniform = false"
+        #@assert dims <= 1 "Uniform Phi is not supported for dims > 1 at this time, set uniform = false"
 
         for i in 1:dims
             weights = reverse(weights,dims = i)
@@ -530,8 +542,16 @@ function gen_one_filter(J,UPC)
     dims = length(J)
     #J = (Jy,Jx)
     filter = Conv(J, UPC=>UPC,stride = J,pad = 0,bias =false)  # First convolution, operating upon a 28x28 image
+    for i in 1:UPC
 
-    filter.weight .= 1.
+        for j in 1:UPC
+            if i == j
+                filter.weight[[(:) for k in 1:dims]...,i,j] .= 1.
+            else
+                filter.weight[[(:) for k in 1:dims]...,i,j] .= 0.
+            end
+        end
+    end
     return filter
 end
 
@@ -545,7 +565,16 @@ function gen_one_reconstructor(J,UPC)
     #J = (Jy,Jx)
     reconstructor = ConvTranspose(J, UPC=>UPC,stride = J,pad = 0,bias =false)  # First convolution, operating upon a 28x28 image
 
-    reconstructor.weight .= 1.
+    for i in 1:UPC
+
+        for j in 1:UPC
+            if i == j
+                reconstructor.weight[[(:) for k in 1:dims]...,i,j] .= 1.
+            else
+                reconstructor.weight[[(:) for k in 1:dims]...,i,j] .= 0.
+            end
+        end
+    end
     return reconstructor
 end
 
@@ -585,9 +614,8 @@ function gen_mesh_pair(fine_mesh,coarse_mesh)
 
     omega_tilde = fine_mesh.omega
 
-    omega_UPC = cat([coarse_mesh.omega for i in 1:UPC]...,dims = dims + 1)
-    omega_UPC = reshape(omega_UPC,(size(omega_UPC))...,1)
-    omega_tilde = fine_mesh.omega ./ one_reconstructor(omega_UPC)[[(:) for i in 1:dims]...,1,1]
+
+    omega_tilde = fine_mesh.omega ./ one_reconstructor(coarse_mesh.omega)
 
 
     return mesh_pair_struct(fine_mesh,coarse_mesh,J,I,one_filter,one_reconstructor,omega_tilde)
@@ -619,34 +647,34 @@ function padding(data,pad_size;circular = false,UPC = 0,BCs = 0,zero_corners = t
         end
     end
 
+    if circular
+        padded_data = NNlib.pad_circular(data,Tuple(cat([[i for j in 1:2] for i in pad_size]...,dims = 1)))
+    else
+        N = size(data)[1:dims]
+        if navier_stokes
+            split_data = [data[[(:) for i in 1:dims]...,j:j,:] for j in 1:UPC]
+            unknown_index = 0
+            padded_data = []
+            for data in split_data
+                unknown_index += 1
+                for i in 1:dims
+                    original_dims = stop_gradient() do
+                        collect(1:length(size(data)))
+                    end
+                    new_dims = stop_gradient() do
+                        copy(original_dims)
+                    end
+                    stop_gradient() do
+                            new_dims[1] = original_dims[i]
+                            new_dims[i] = 1
+                    end
+
+                    data = permutedims(data,new_dims)
+
+                    pad_start = data[(end-pad_size[i]+1):end,[(:) for j in 1:(dims+1)]...]
+                    pad_end = data[1:pad_size[i],[(:) for j in 1:(dims+1)]...]
 
 
-    N = size(data)[1:dims]
-    if navier_stokes && (circular == false)
-        split_data = [data[[(:) for i in 1:dims]...,j:j,:] for j in 1:UPC]
-        unknown_index = 0
-        padded_data = []
-        for data in split_data
-            unknown_index += 1
-            for i in 1:dims
-                original_dims = stop_gradient() do
-                    collect(1:length(size(data)))
-                end
-                new_dims = stop_gradient() do
-                    copy(original_dims)
-                end
-                stop_gradient() do
-                        new_dims[1] = original_dims[i]
-                        new_dims[i] = 1
-                end
-
-                data = permutedims(data,new_dims)
-
-                pad_start = data[(end-pad_size[i]+1):end,[(:) for j in 1:(dims+1)]...]
-                pad_end = data[1:pad_size[i],[(:) for j in 1:(dims+1)]...]
-
-
-                if circular == false
                     #@assert one_hot[i][1] != 0 && one_hot[i][2] != 0 "A one-hot encoding of 0 is saved for the corners outside the domain. Use a different number."
                     if BCs[1,i,unknown_index] != "c" && BCs[1,i,unknown_index] != "m"
                         pad_start_cache = 2* BCs[1,i,unknown_index] .- reverse(pad_end,dims = 1)
@@ -668,38 +696,36 @@ function padding(data,pad_size;circular = false,UPC = 0,BCs = 0,zero_corners = t
 
                     pad_start = pad_start_cache
                     pad_end = pad_end_cache
+
+
+                    data = cat([pad_start,data,pad_end]...,dims = 1)
+                    data = permutedims(data,new_dims)
+
                 end
-
-                data = cat([pad_start,data,pad_end]...,dims = 1)
-                data = permutedims(data,new_dims)
-
+                push!(padded_data,data)
             end
-            push!(padded_data,data)
-        end
 
-        padded_data = cat(padded_data...,dims = dims + 1)
+            padded_data = cat(padded_data...,dims = dims + 1)
 
-        if size(data)[dims+1] > UPC
-            data = data[[(:) for i in 1:dims]...,UPC+1:end,:]
-            for i in 1:dims
-                original_dims = stop_gradient() do
-                    collect(1:length(size(data)))
-                end
-                new_dims = stop_gradient() do
-                    copy(original_dims)
-                end
-                stop_gradient() do
-                        new_dims[1] = original_dims[i]
-                        new_dims[i] = 1
-                end
+            if size(data)[dims+1] > UPC
+                data = data[[(:) for i in 1:dims]...,UPC+1:end,:]
+                for i in 1:dims
+                    original_dims = stop_gradient() do
+                        collect(1:length(size(data)))
+                    end
+                    new_dims = stop_gradient() do
+                        copy(original_dims)
+                    end
+                    stop_gradient() do
+                            new_dims[1] = original_dims[i]
+                            new_dims[i] = 1
+                    end
 
-                data = permutedims(data,new_dims)
+                    data = permutedims(data,new_dims)
 
-                pad_start = data[(end-pad_size[i]+1):end,[(:) for j in 1:(dims+1)]...]
-                pad_end = data[1:pad_size[i],[(:) for j in 1:(dims+1)]...]
+                    pad_start = data[(end-pad_size[i]+1):end,[(:) for j in 1:(dims+1)]...]
+                    pad_end = data[1:pad_size[i],[(:) for j in 1:(dims+1)]...]
 
-
-                if circular == false
                     #@assert one_hot[i][1] != 0 && one_hot[i][2] != 0 "A one-hot encoding of 0 is saved for the corners outside the domain. Use a different number."
                     BC_right = BCs[1,i,:]
                     BC_left = BCs[2,i,:]
@@ -737,36 +763,34 @@ function padding(data,pad_size;circular = false,UPC = 0,BCs = 0,zero_corners = t
                     pad_start
 
 
+
+                    data = cat([pad_start,data,pad_end]...,dims = 1)
+                    data = permutedims(data,new_dims)
+
                 end
-
-                data = cat([pad_start,data,pad_end]...,dims = 1)
-                data = permutedims(data,new_dims)
-
+                padded_data = cat(padded_data,data,dims = dims + 1)
             end
-            padded_data = cat(padded_data,data,dims = dims + 1)
-        end
 
-    else
-        for i in 1:dims
+        else
+            for i in 1:dims
 
-            original_dims = stop_gradient() do
-                collect(1:length(size(data)))
-            end
-            new_dims = stop_gradient() do
-                copy(original_dims)
-            end
-            stop_gradient() do
+                original_dims = stop_gradient() do
+                    collect(1:length(size(data)))
+                end
+                new_dims = stop_gradient() do
+                    copy(original_dims)
+                end
+                stop_gradient() do
                     new_dims[1] = original_dims[i]
                     new_dims[i] = 1
-            end
+                end
 
-            data = permutedims(data,new_dims)
+                data = permutedims(data,new_dims)
 
-            pad_start = data[(end-pad_size[i]+1):end,[(:) for j in 1:(dims+1)]...]
-            pad_end = data[1:pad_size[i],[(:) for j in 1:(dims+1)]...]
+                pad_start = data[(end-pad_size[i]+1):end,[(:) for j in 1:(dims+1)]...]
+                pad_end = data[1:pad_size[i],[(:) for j in 1:(dims+1)]...]
 
 
-            if circular == false
 
                 #@assert one_hot[i][1] != 0 && one_hot[i][2] != 0 "A one-hot encoding of 0 is saved for the corners outside the domain. Use a different number."
                 if BCs[1,i,1] != "c" && BCs[1,i,1] != "m"
@@ -789,14 +813,13 @@ function padding(data,pad_size;circular = false,UPC = 0,BCs = 0,zero_corners = t
 
                 pad_start = pad_start_cache
                 pad_end = pad_end_cache
+
+                data = cat([pad_start,data,pad_end]...,dims = 1)
+                data = permutedims(data,new_dims)
             end
-
-            data = cat([pad_start,data,pad_end]...,dims = 1)
-            data = permutedims(data,new_dims)
+            padded_data = data
         end
-        padded_data = data
     end
-
 
 
 
@@ -899,7 +922,14 @@ function simulate(input0,mesh,dt,t_start,t_end,rhs,time_step_function;save_every
     end
     input = input0
     pre_alloc_counter = 0
-    for i in 1:steps
+
+    if pre_allocate
+        iterate = tqdm
+    else
+        iterate = collect
+    end
+
+    for i in iterate(1:steps)
         input += time_step_function(input,mesh,t,dt,rhs;other_arguments = other_arguments)
         t  = t .+ dt
         if i % save_every == 0
@@ -956,13 +986,18 @@ end
 
 using NNlib
 
-function cons_mom_B(B_kernel;channel = 1)
+function cons_mom_B(B_kernel;channels = 1)
     if B_kernel != 0
-        dims = length(size(B_kernel))-2
-        channel_mask = gen_channel_mask(B_kernel,channel)
+        for channel in channels
+            dims = length(size(B_kernel))-2
+            channel_mask = gen_channel_mask(B_kernel,channel)
 
-        means = mean(B_kernel,dims = collect(1:dims))
-        return B_kernel .- means .* channel_mask
+            means = mean(B_kernel,dims = collect(1:dims))
+
+            B_kernel = B_kernel .- means .* channel_mask
+
+        end
+        return B_kernel
     else
         return 0
     end
@@ -1038,10 +1073,10 @@ function gen_skew_NN(kernel_sizes,channels,strides,r,B;UPC = 0,boundary_padding 
 
     B1,B2,B3 = 0,0,0
     if constrain_energy
-        B1 = Float64.(Flux.glorot_uniform(Tuple(2*[B...] .+1)...,r,r))
-        B2 = Float64.(Flux.glorot_uniform(Tuple(2*[B...] .+1)...,r,r))
+        B1 = Float32.(Flux.glorot_uniform(Tuple(2*[B...] .+1)...,r,r))
+        B2 = Float32.(Flux.glorot_uniform(Tuple(2*[B...] .+1)...,r,r))
         if dissipation
-            B3 = Float64.(Flux.glorot_uniform(Tuple(2*[B...] .+1)...,r,r))
+            B3 = Float32.(Flux.glorot_uniform(Tuple(2*[B...] .+1)...,r,r))
         end
     end
 
@@ -1094,50 +1129,46 @@ function gen_skew_NN(kernel_sizes,channels,strides,r,B;UPC = 0,boundary_padding 
 
         phi = output[[(:) for i in 1:dims]...,1:r,:]
 
-
-        psi = 0
-        if constrain_energy && dissipation
-            psi = output[[(:) for i in 1:dims]...,r+1:2*r,:]
-            #dTd = sum( d.^2 ,dims = [i for i in 1:dims])
-        else
-            psi = 0
-        end
-
-
-        B1,B2,B3 = B_mats
-
-
-
-        if conserve_momentum && constrain_energy
-            B1 = cons_mom_B(B1)
-            B2 = cons_mom_B(B2)
-            B3 = cons_mom_B(B3)
-        end
-        B1_T,B2_T,B3_T = 0,0,0
         if constrain_energy
+            psi = 0
+            if dissipation
+                psi = output[[(:) for i in 1:dims]...,r+1:2*r,:]
+                #dTd = sum( d.^2 ,dims = [i for i in 1:dims])
+            end
+
+
+            B1,B2,B3 = B_mats
+
+
+
+            if conserve_momentum
+                B1 = cons_mom_B(B1,channels = collect(1:UPC))
+                B2 = cons_mom_B(B2,channels = collect(1:UPC))
+                B3 = cons_mom_B(B3,channels = collect(1:UPC))
+            end
+
 
             B1_T = transpose_B(B1)
-
             B2_T = transpose_B(B2)
             B3_T = transpose_B(B3)
-        else
-            B1_T,B2_T,B3_T = 0,0,0
-        end
 
-        c_tilde = 0
-        if constrain_energy # skew_symmetric_form
+
+
+
+     # skew_symmetric_form
             c_tilde = NNlib.conv(NNlib.conv(a,B1) .* phi,B2_T) - NNlib.conv(NNlib.conv(a,B2) .* phi,B1_T)
             if dissipation
                 c_tilde -=  NNlib.conv(psi.^2 .* NNlib.conv(a,B3),B3_T)
             end
-        else
 
-            c_tilde = phi
+
+            return c_tilde
+
+        else
+            return phi
 
         end
 
-        #c_tilde = phi
-        return  c_tilde
     end
 
 
