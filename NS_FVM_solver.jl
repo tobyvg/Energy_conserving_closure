@@ -204,7 +204,7 @@ function gen_operators_uniform(mesh;precision = f32)
                 shifted_select = [(:);[1 for i in 1:dims-1]]
                 stencil[circshift(shifted_select,(i-1,))...] += [0,1/2,1/2]
             end
-            A_shifted.weight[[(:) for k in 1:dims]...,j,i + (j-1)*UPC] .= stencil
+            A_shifted.weight[[(:) for k in 1:dims]...,j,j + (i-1)*UPC] .= stencil
         end
     end
 
@@ -226,10 +226,8 @@ function gen_operators_uniform(mesh;precision = f32)
     function C(V,h = h,A_unshifted = A_unshifted,A_shifted = A_shifted,dims = dims,nabla = nabla)
         avgs_unshifted = A_unshifted(V)
         avgs_shifted = A_shifted(V)
-        reordering = stop_gradient() do
-            (reshape(collect(1:dims .^ 2),(dims,dims))')[1:end]
-        end
-        multiply = avgs_unshifted  .* avgs_shifted[[(:) for i in 1:dims]...,reordering,:]
+
+        multiply = avgs_unshifted  .* avgs_shifted#[[(:) for i in 1:dims]...,reordering,:]
 
         return  nabla(multiply)
     end
@@ -287,4 +285,66 @@ function gen_operators_uniform(mesh;precision = f32)
 
 
     return operators_struct(M,G,C,D,w)#,Q,Q_T,D
+end
+
+
+struct setup_struct
+    O
+    PS
+    GS
+    mesh
+end
+
+function gen_setup(mesh)
+    O = gen_operators_uniform(mesh)
+    PS = gen_pressure_solver(mesh,O)
+    GS = gen_grid_swapper(mesh)
+
+    return setup_struct(O,PS,GS,mesh)
+end
+
+
+function gen_rhs(setup,F;Re = 1000,damping = 0)
+
+
+    function rhs(V,mesh,t;Re = Re,O=setup.O,PS = setup.PS,F = Float32.(padding(F,(1,1),circular = true)),solve_pressure = true,other_arguments = 0)
+
+
+        dims = mesh.dims
+
+        pad_V = padding(V,Tuple((3 for i in 1:dims)),circular = true)
+        
+
+
+
+        DV = Float32(1/Re) .* O.D(pad_V[[(2:end-1) for i in 1:dims]...,:,:])
+
+        CV = O.C(pad_V)
+
+
+
+        rhs = DV - CV
+
+        #### kolmogorov flow ###
+
+        rhs = rhs .+ F
+
+        if damping != 0
+            rhs -= damping*pad_V[[(3:end-2) for i in 1:dims]...,:,:]
+        end
+
+        ########################
+
+        if solve_pressure
+            r = O.M(rhs)
+            p = Float32.(PS(r))
+            return rhs[[(2:end-1) for i in 1:dims]...,:,:] - O.G(padding(p,Tuple((1 for i in 1:dims)),circular = true))
+        else
+            return rhs[[(2:end-1) for i in 1:dims]...,:,:]
+        end
+
+
+    end
+
+    return rhs
 end

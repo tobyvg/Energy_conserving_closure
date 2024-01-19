@@ -1,6 +1,7 @@
 using LinearAlgebra
-using Plots
+
 using SparseArrays
+
 
 
 using FFTW
@@ -70,7 +71,7 @@ function construct_spectral_filter(k_mats,max_k)
     return filter
 end
 
-function generate_random_field(N,max_k;norm = 1,samples = (1,1))
+function gen_random_field(N,max_k;norm = 1,samples = (1,1))
     dims = length(N)
     k = construct_k(N)
     filter = construct_spectral_filter(k,max_k)
@@ -414,7 +415,7 @@ end
 
 
 
-function generate_coarse_from_fine_mesh(fine_mesh,J)
+function gen_coarse_from_fine_mesh(fine_mesh,J)
 
     divide = [fine_mesh.N...] .% [J...]
     for i in divide
@@ -873,17 +874,27 @@ end
 function time_step(input,mesh,t,dt,rhs;other_arguments = 0,method = "RK4")
     if method == "RK4"
 
-        k1 = rhs(input,mesh,t,other_arguments = other_arguments)
-        k2 = rhs(input .+ dt*k1/2,mesh,t .+ dt/2,other_arguments = other_arguments)
-        k3 = rhs(input .+ dt*k2/2,mesh,t .+ dt/2,other_arguments = other_arguments)
-        k4 = rhs(input .+ dt*k3,mesh,t .+ dt,other_arguments = other_arguments)
 
-        return 1/6*dt*(k1 .+ 2*k2 .+ 2*k3 .+ k4)
+        k1 =  rhs(input,mesh,t,other_arguments = other_arguments)
+
+        k2 = rhs(input + dt*k1/2,mesh,t .+ dt/2,other_arguments = other_arguments)
+
+
+        #k1 = rhs(input,mesh,t,other_arguments = other_arguments)
+
+        k3 = rhs(input + dt*k2/2,mesh,t .+ dt/2,other_arguments = other_arguments)
+        k4 = rhs(input + dt*k3,mesh,t .+ dt,other_arguments = other_arguments)
+
+
+
+        return 1/6*dt*(k1 + 2*k2 + 2*k3 + k4)
+
+
     end
 end
 
 
-function simulate(input0,mesh,dt,t_start,t_end,rhs,time_step_function;save_every = 1,other_arguments = 0,pre_allocate = false)
+function simulate(input0,mesh,dt,t_start,t_end,rhs,time_step_function;save_every = 1,other_arguments = 0,pre_allocate = false, GC_every = 100)
 
     dims = length(size(input0))-2
 
@@ -894,11 +905,11 @@ function simulate(input0,mesh,dt,t_start,t_end,rhs,time_step_function;save_every
 
     if pre_allocate == false
         output = stop_gradient() do
-            Array{Float64}(undef, size(input0)[1:end]..., 0)
+            Array{Float32}(undef, size(input0)[1:end]..., 0)
         end
 
         output_t = stop_gradient() do
-            Array{Float64}(undef, ones(Int,dims + 1)...,size(input0)[end], 0)
+            Array{Float32}(undef, ones(Int,dims + 1)...,size(input0)[end], 0)
         end
     else
         output = stop_gradient() do
@@ -932,16 +943,25 @@ function simulate(input0,mesh,dt,t_start,t_end,rhs,time_step_function;save_every
     for i in iterate(1:steps)
         input += time_step_function(input,mesh,t,dt,rhs;other_arguments = other_arguments)
         t  = t .+ dt
+
+        if pre_allocate
+            @assert isnan(input[1]) == false "NaN appeared in simulation"
+        end
         if i % save_every == 0
             pre_alloc_counter += 1
-            if pre_allocate == false
+            if pre_allocate
+                output[[(:) for i in size(input)]...,pre_alloc_counter] .+= input
+                output_t[[(:) for i in size(t)]...,pre_alloc_counter] .+= t
+            else
                 output = cat([output,input]...,dims = dims + 3)
                 output_t = cat([output_t,t]...,dims = dims + 3)
-            else
-                output[[(:) for i in size(input)]...,pre_alloc_counter] += input
-                output_t[[(:) for i in size(t)]...,pre_alloc_counter] += t
             end
         end
+
+
+        #if i % GC_every == 0 && pre_allocate
+        #    GC.gc()
+        #end
     end
 
     return output_t,output
