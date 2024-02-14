@@ -229,7 +229,10 @@ end
 
 
 
-
+"""
+Carries out a singular value decomposition (SVD) on a local basis.
+It returns one matrix per point in the coarse mesh.
+"""
 function carry_out_local_SVD(input,MP;subtract_average = false)
     UPC = MP.coarse_mesh.UPC
     J = MP.J
