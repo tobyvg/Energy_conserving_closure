@@ -46,7 +46,7 @@ V0 = Float32.(V-Gp)
 #heatmap(setup.O.M(V0)[:,:,1,1])
 
 t_start = 0
-t_end = 50
+t_end = 100
 dt = 0.01
 save_every = 1000
 pre_allocate = true
@@ -54,6 +54,8 @@ pre_allocate = true
 
 t_data,sim_data = simulate(V0,fine_mesh,dt,t_start,t_end,KF_rhs,time_step,save_every = save_every,pre_allocate = pre_allocate)
 #0
+
+GC.gc()
 
 
 t_start = 0

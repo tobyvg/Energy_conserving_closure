@@ -229,10 +229,7 @@ end
 
 
 
-"""
-Carries out a singular value decomposition (SVD) on a local basis.
-It returns one matrix per point in the coarse mesh.
-"""
+
 function carry_out_local_SVD(input,MP;subtract_average = false)
     UPC = MP.coarse_mesh.UPC
     J = MP.J
@@ -367,6 +364,7 @@ function gen_projection_operators(POD_modes,MP;uniform = false)
     dims = MP.fine_mesh.dims
     J = MP.J
     I = MP.I
+    r = size(POD_modes)[end]
 
     sqrt_omega_tilde = sqrt.(MP.omega_tilde)
     inv_sqrt_omega_tilde = 1 ./ sqrt_omega_tilde

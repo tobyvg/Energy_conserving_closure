@@ -307,13 +307,13 @@ end
 function gen_rhs(setup,F;Re = 1000,damping = 0)
 
 
-    function rhs(V,mesh,t;Re = Re,O=setup.O,PS = setup.PS,F = Float32.(padding(F,(1,1),circular = true)),solve_pressure = true,other_arguments = 0)
+    function rhs(V,mesh,t;Re = Re,O=setup.O,PS = setup.PS,F = Float32.(padding(F,(1,1),circular = true)),solve_pressure = true,damping = damping,other_arguments = 0)
 
 
         dims = mesh.dims
 
         pad_V = padding(V,Tuple((3 for i in 1:dims)),circular = true)
-        
+
 
 
 
